@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>ESP32_DSM_Prototipo_Dam_casa</title>
+  <script src="mqtt.min.js"></script>
+  <style>
+    * { box-sizing: border-box; font-family: system-ui, -apple-system, sans-serif; user-select: none; }
+    body { background: #121212; color: #e0e0e0; margin: 0; padding: 16px; display: flex; flex-direction: column; align-items: center; }
+    .container { width: 100%; max-width: 420px; }
+    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; background: #1e1e1e; padding: 14px 18px; border-radius: 12px; border: 1px solid #333; }
+    .header h2 { margin: 0; font-size: 1.1rem; }
+    .status { font-size: 0.85rem; font-weight: bold; padding: 4px 10px; border-radius: 20px; background: #4a1515; color: #ff6b6b; }
+    .status.online { background: #133b22; color: #4ade80; }
+    
+    .card { background: #1e1e1e; border-radius: 12px; padding: 18px; margin-bottom: 16px; border: 1px solid #333; }
+    .card-title { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 1px; color: #9ca3af; margin-bottom: 14px; }
+    
+    /* Llaves selectoras (Switches) */
+    .switch-row { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid #2c2c2c; }
+    .switch-row:last-child { border-bottom: none; padding-bottom: 0; }
+    .switch-label { font-size: 1rem; font-weight: 500; }
+    .switch-sub { font-size: 0.75rem; color: #888; display: block; }
+    
+    .switch { position: relative; display: inline-block; width: 56px; height: 30px; }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider { position: absolute; cursor: pointer; inset: 0; background-color: #374151; transition: .3s; border-radius: 30px; }
+    .slider:before { position: absolute; content: ""; height: 22px; width: 22px; left: 4px; bottom: 4px; background-color: white; transition: .3s; border-radius: 50%; }
+    input:checked + .slider { background-color: #2563eb; }
+    input#sw-parada:checked + .slider { background-color: #dc2626; }
+    input:checked + .slider:before { transform: translateX(26px); }
+
+    /* Control Analógico (Potenciómetro + Pulsadores Hold) */
+    .val-display { text-align: center; font-size: 2.5rem; font-weight: bold; color: #38bdf8; margin: 10px 0; }
+    input[type=range] { width: 100%; height: 10px; border-radius: 5px; background: #374151; outline: none; margin: 15px 0; }
+    .btn-group { display: flex; gap: 12px; margin-top: 10px; }
+    .hold-btn { flex: 1; padding: 16px; font-size: 1.4rem; font-weight: bold; border: none; border-radius: 10px; background: #2563eb; color: white; cursor: pointer; touch-action: manipulation; }
+    .hold-btn:active { background: #1d4ed8; transform: scale(0.98); }
+    .hold-btn.dec { background: #374151; }
+    .hold-btn.dec:active { background: #4b5563; }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <div class="header">
+    <h2>ESP32_DSM_Prototipo_Dam_casa</h2>
+    <span id="status" class="status">Desconectado</span>
+  </div>
+
+  <!-- SALIDAS DIGITALES -->
+  <div class="card">
+    <div class="card-title">Llaves Selectorаs (Salidas Digitales)</div>
+    
+    <div class="switch-row">
+      <div>
+        <span class="switch-label">Velocidad Fija (RUN)</span>
+        <span class="switch-sub">GPIO 14 • vfd/control/VelocidadFija</span>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="sw-run" onchange="toggleDigital('vfd/control/VelocidadFija', this.checked)">
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="switch-row">
+      <div>
+        <span class="switch-label">Parada (STOP)</span>
+        <span class="switch-sub">GPIO 27 • vfd/control/Parada</span>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="sw-parada" onchange="toggleDigital('vfd/control/Parada', this.checked)">
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="switch-row">
+      <div>
+        <span class="switch-label">Contramarcha (REV)</span>
+        <span class="switch-sub">GPIO 26 • vfd/control/Contramarcha</span>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="sw-rev" onchange="toggleDigital('vfd/control/Contramarcha', this.checked)">
+        <span class="slider"></span>
+      </label>
+    </div>
+  </div>
+
+  <!-- SALIDA ANALÓGICA -->
+  <div class="card">
+    <div class="card-title">Simulacion potenciometro (PWM GPIO 25)</div>
+    <div class="val-display"><span id="pct-text">0</span>%</div>
+    
+    <input type="range" id="pot-slider" min="0" max="100" value="0" oninput="actualizarSlider(this.value)">
+    
+    <div class="btn-group">
+      <button class="hold-btn dec" id="btn-dec">- Bajar</button>
+      <button class="hold-btn" id="btn-inc">+ Subir</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  // Conexión al mismo broker público EMQX por WebSockets Seguros
+  const brokerUrl = 'wss://broker.emqx.io:8084/mqtt';
+  const clientId = 'WebPanel_VFD_' + Math.random().toString(16).substr(2, 8);
+  const statusEl = document.getElementById('status');
+
+  const client = mqtt.connect(brokerUrl, {
+    clientId: clientId,
+    clean: true,
+    reconnectPeriod: 3000
+  });
+
+  client.on('connect', () => {
+    statusEl.textContent = 'Conectado';
+    statusEl.classList.add('online');
+  });
+
+  client.on('close', () => {
+    statusEl.textContent = 'Desconectado';
+    statusEl.classList.remove('online');
+  });
+
+  // Publicar estados digitales (1 / 0)
+  function toggleDigital(topic, isChecked) {
+    if (!client.connected) return;
+    const payload = isChecked ? '1' : '0';
+    client.publish(topic, payload, { qos: 1 });
+  }
+
+  // Lógica del control analógico (Slider + Pulsadores mantenidos)
+  let valorActual = 0;
+  let intervaloHold = null;
+  let ultimoEnvio = 0;
+
+  const sliderEl = document.getElementById('pot-slider');
+  const textEl = document.getElementById('pct-text');
+
+  function enviarAnalogo(nuevoValor, forzar = false) {
+    valorActual = Math.max(0, Math.min(100, nuevoValor));
+    sliderEl.value = valorActual;
+    textEl.textContent = valorActual;
+
+    // Evita saturar el broker si se desliza muy rápido (envía máx cada 100 ms)
+    const ahora = Date.now();
+    if (client.connected && (forzar || ahora - ultimoEnvio > 100)) {
+      client.publish('vfd/control/potenciometro', valorActual.toString(), { qos: 1 });
+      ultimoEnvio = ahora;
+    }
+  }
+
+  function actualizarSlider(val) {
+    enviarAnalogo(parseInt(val), false);
+  }
+
+  // Asegura enviar el valor exacto al soltar el slider
+  sliderEl.addEventListener('change', () => enviarAnalogo(parseInt(sliderEl.value), true));
+
+  // Configurar pulsadores de mantener apretado (compatible con táctil Android y mouse PC)
+  function configurarPulsadorHold(btnId, paso) {
+    const btn = document.getElementById(btnId);
+
+    const iniciar = (e) => {
+      e.preventDefault();
+      enviarAnalogo(valorActual + paso, true);
+      intervaloHold = setInterval(() => {
+        enviarAnalogo(valorActual + paso, true);
+      }, 150); // Velocidad de incremento/decremento (cada 150 ms)
+    };
+
+    const detener = () => {
+      if (intervaloHold) {
+        clearInterval(intervaloHold);
+        intervaloHold = null;
+        enviarAnalogo(valorActual, true);
+      }
+    };
+
+    btn.addEventListener('mousedown', iniciar);
+    btn.addEventListener('touchstart', iniciar, { passive: false });
+    window.addEventListener('mouseup', detener);
+    window.addEventListener('touchend', detener);
+    btn.addEventListener('touchcancel', detener);
+  }
+
+  configurarPulsadorHold('btn-inc', 2);  // Sube de a 2% mientras se mantiene
+  configurarPulsadorHold('btn-dec', -2); // Baja de a 2% mientras se mantiene
+</script>
+
+</body>
+</html>
